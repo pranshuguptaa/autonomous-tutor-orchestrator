@@ -27,16 +27,15 @@ def test_adaptation_for_visual_learner():
     # Assert
     assert result["extracted_parameters"]["include_analogies"] is True
 
-@patch('src.nodes.ChatPromptTemplate')
-@patch('src.nodes.ChatGoogleGenerativeAI')
-def test_router_selects_notemaker(mock_llm, mock_prompt):
+@patch('src.nodes.get_router_chain')
+def test_router_selects_notemaker(mock_get_chain):
     # Arrange
-    # Create a mock for the entire chain object
-    mock_chain = mock_prompt.from_messages.return_value | mock_llm.return_value.with_structured_output.return_value
-    
-    # Configure the final .invoke() call on the chain to return our desired object
+    # Create a mock chain object
+    mock_chain = mock_get_chain.return_value
+
+    # Configure the chain to return our desired RouterSchema
     mock_chain.invoke.return_value = RouterSchema(tool_name="NoteMaker")
-    
+
     state = {
         "current_query": "make me notes",
         "user_profile": {},
@@ -44,9 +43,8 @@ def test_router_selects_notemaker(mock_llm, mock_prompt):
     }
 
     # Act
-    # We need to temporarily patch the 'chain' object inside the function's scope
-    with patch('src.nodes.chain', mock_chain):
-        result = route_query(state)
+    result = route_query(state)
 
     # Assert
     assert result["selected_tool"] == "NoteMaker"
+    mock_chain.invoke.assert_called_once_with({"query": "make me notes"})

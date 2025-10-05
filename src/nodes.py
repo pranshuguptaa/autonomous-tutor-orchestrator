@@ -5,24 +5,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
-from langgraph.graph import StateGraph, END
 from src.graph_state import GraphState
 from src.schemas import NoteMakerInput, FlashcardGeneratorInput, ConceptExplainerInput
 import httpx
 
 load_dotenv()
-
-# Add these lines for debugging right after load_dotenv()
-print("--- DEBUGGING API KEY ---")
-api_key = os.getenv("GOOGLE_API_KEY")
-if api_key:
-    # Print only the first few and last few characters for security
-    print(f"API Key found. Starts with: {api_key[:4]}... Ends with: {api_key[-4:]}")
-else:
-    print("API Key NOT FOUND in environment.")
-print("-------------------------")
 
 class RouterSchema(BaseModel):
     """Schema for the router's output."""
@@ -33,55 +21,36 @@ class RouterSchema(BaseModel):
         description="The name of the tool to use.",
     )
 
-# For route_query
-llm_route = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
-structured_llm_route = llm_route.with_structured_output(RouterSchema)
+def get_router_chain():
+    """Get the router chain - created on demand to avoid import issues."""
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-system_prompt_route = """You are an expert AI agent. Your job is to analyze the user's query and route it to the most appropriate educational tool. You must choose one of the following tools:
+        llm_route = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
+        structured_llm_route = llm_route.with_structured_output(RouterSchema)
 
-    - **NoteMaker**: Use this tool when the user asks to summarize, take notes, or create a study guide on a topic.
-    - **FlashcardGenerator**: Use this tool when the user wants to test their knowledge, create flashcards, or practice questions.
-    - **ConceptExplainer**: Use this tool when the user asks 'what is...?', 'explain...', or expresses confusion about a specific concept.
-    - **clarify**: Use this if the query is a greeting, is ambiguous, or doesn't clearly fit any other tool."""
+        system_prompt_route = """You are an expert AI agent. Your job is to analyze the user's query and route it to the most appropriate educational tool. You must choose one of the following tools:
 
-prompt_route = ChatPromptTemplate.from_messages(
-    [("system", system_prompt_route), ("human", "{query}")]
-)
+            - **NoteMaker**: Use this tool when the user asks to summarize, take notes, or create a study guide on a topic.
+            - **FlashcardGenerator**: Use this tool when the user wants to test their knowledge, create flashcards, or practice questions.
+            - **ConceptExplainer**: Use this tool when the user asks 'what is...?', 'explain...', or expresses confusion about a specific concept.
+            - **clarify**: Use this if the query is a greeting, is ambiguous, or doesn't clearly fit any other tool."""
 
-chain = prompt_route | structured_llm_route
+        prompt_route = ChatPromptTemplate.from_messages(
+            [("system", system_prompt_route), ("human", "{query}")]
+        )
 
-def route_query(state: GraphState) -> dict:
-    """The router node for the agent."""
-
-    print("---ROUTING QUERY---")
-
-    response = chain.invoke({"query": state["current_query"]})
-
-    print(f"Router decision: {response.tool_name}")
-    return {"selected_tool": response.tool_name}
-
+        return prompt_route | structured_llm_route
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        raise
 
 def route_query(state: GraphState) -> dict:
     """The router node for the agent."""
 
     print("---ROUTING QUERY---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
-    structured_llm = llm.with_structured_output(RouterSchema)
-
-    system_prompt = """You are an expert AI agent. Your job is to analyze the user's query and route it to the most appropriate educational tool. You must choose one of the following tools:
-
-    - **NoteMaker**: Use this tool when the user asks to summarize, take notes, or create a study guide on a topic.
-    - **FlashcardGenerator**: Use this tool when the user wants to test their knowledge, create flashcards, or practice questions.
-    - **ConceptExplainer**: Use this tool when the user asks 'what is...?', 'explain...', or expresses confusion about a specific concept.
-    - **clarify**: Use this if the query is a greeting, is ambiguous, or doesn't clearly fit any other tool."""
-
-    prompt = ChatPromptTemplate.from_messages(
-        [("system", system_prompt), ("human", "{query}")]
-    )
-
-    chain = prompt | structured_llm
-
+    chain = get_router_chain()
     response = chain.invoke({"query": state["current_query"]})
 
     print(f"Router decision: {response.tool_name}")
@@ -93,37 +62,43 @@ def extract_note_maker_parameters(state: GraphState) -> dict:
 
     print("---EXTRACTING NOTE MAKER PARAMETERS---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
-    llm_with_tool = llm.bind_tools([NoteMakerInput])
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    system_prompt = """You are a powerful AI assistant. Your sole job is to analyze the user's request and call the `NoteMakerInput` tool with the appropriate parameters.
-    Do not respond with conversational text. You MUST call the tool.
-    If a parameter like `subject` or `topic` is not explicitly mentioned, infer it from the context of the conversation.
-    The user's query is: '{query}'"""
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
+        llm_with_tool = llm.bind_tools([NoteMakerInput])
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", state["chat_history"]),
-            ("human", "Current user query: {query}"),
-        ]
-    )
+        system_prompt = """You are a powerful AI assistant. Your sole job is to analyze the user's request and call the `NoteMakerInput` tool with the appropriate parameters.
+        Do not respond with conversational text. You MUST call the tool.
+        If a parameter like `subject` or `topic` is not explicitly mentioned, infer it from the context of the conversation.
+        The user's query is: '{query}'"""
 
-    chain = prompt | llm_with_tool
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", state["chat_history"]),
+                ("human", "Current user query: {query}"),
+            ]
+        )
 
-    response = chain.invoke({"query": state["current_query"]})
+        chain = prompt | llm_with_tool
 
-    if not response.tool_calls:
-        print(f"ERROR: AI did not call a tool. Response: {response.content}")
-        raise ValueError("No tool call found in the response.")
+        response = chain.invoke({"query": state["current_query"]})
 
-    extracted_args = response.tool_calls[0]["args"]
+        if not response.tool_calls:
+            print(f"ERROR: AI did not call a tool. Response: {response.content}")
+            raise ValueError("No tool call found in the response.")
 
-    extracted_args["user_info"] = state["user_profile"]
-    extracted_args["chat_history"] = state["chat_history"]
+        extracted_args = response.tool_calls[0]["args"]
 
-    print(f"Extracted parameters: {extracted_args}")
-    return {"extracted_parameters": extracted_args}
+        extracted_args["user_info"] = state["user_profile"]
+        extracted_args["chat_history"] = state["chat_history"]
+
+        print(f"Extracted parameters: {extracted_args}")
+        return {"extracted_parameters": extracted_args}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        raise
 
 
 def handle_flashcard_generator(state: GraphState) -> dict:
@@ -208,39 +183,45 @@ def extract_flashcard_parameters(state: GraphState) -> dict:
     """
     print("---EXTRACTING FLASHCARD PARAMETERS---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
-    llm_with_tool = llm.bind_tools([FlashcardGeneratorInput])
-    
-    system_prompt = "You are an expert at extracting information from a user's query to fill out the arguments for the `FlashcardGeneratorInput`  tool. You must call the tool."
-    
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", state["chat_history"]),
-            ("human", "Current user query: {query}"),
-        ]
-    )
-    
-    chain = prompt | llm_with_tool
-    
-    response = chain.invoke({"query": state["current_query"]})
-    
-    if not response.tool_calls:
-        print("ERROR: AI did not call a tool.")
-        # If the AI fails, we signal a failure to the graph
-        return {"extraction_status": "failure"}
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    extracted_args = response.tool_calls[0]["args"]
-    
-    # Check if the most important parameter was found
-    if not extracted_args.get("topic"):
-        print("ERROR: Topic not found in extraction.")
-        return {"extraction_status": "failure", "extracted_parameters": extracted_args}
-        
-    extracted_args["user_info"] = state["user_profile"]
-    
-    print(f"Extracted flashcard parameters: {extracted_args}")
-    return {"extraction_status": "success", "extracted_parameters": extracted_args}
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
+        llm_with_tool = llm.bind_tools([FlashcardGeneratorInput])
+
+        system_prompt = "You are an expert at extracting information from a user's query to fill out the arguments for the `FlashcardGeneratorInput` tool. You must call the tool."
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", state["chat_history"]),
+                ("human", "Current user query: {query}"),
+            ]
+        )
+
+        chain = prompt | llm_with_tool
+
+        response = chain.invoke({"query": state["current_query"]})
+
+        if not response.tool_calls:
+            print("ERROR: AI did not call a tool.")
+            # If the AI fails, we signal a failure to the graph
+            return {"extraction_status": "failure"}
+
+        extracted_args = response.tool_calls[0]["args"]
+
+        # Check if the most important parameter was found
+        if not extracted_args.get("topic"):
+            print("ERROR: Topic not found in extraction.")
+            return {"extraction_status": "failure", "extracted_parameters": extracted_args}
+
+        extracted_args["user_info"] = state["user_profile"]
+
+        print(f"Extracted flashcard parameters: {extracted_args}")
+        return {"extraction_status": "success", "extracted_parameters": extracted_args}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        return {"extraction_status": "failure"}
 
 
 def extract_concept_explainer_parameters(state: GraphState) -> dict:
@@ -248,109 +229,136 @@ def extract_concept_explainer_parameters(state: GraphState) -> dict:
 
     print("---EXTRACTING CONCEPT EXPLAINER PARAMETERS---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
-    llm_with_tool = llm.bind_tools([ConceptExplainerInput])
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    system_prompt = """You are a powerful AI assistant. Analyze the user's request and call the `ConceptExplainerInput` tool with the appropriate parameters.
-    Do not respond with conversational text. You MUST call the tool.
-    If some parameters like `concept` or `context` are implied, infer them from the conversation context.
-    The user's query is: '{query}'"""
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
+        llm_with_tool = llm.bind_tools([ConceptExplainerInput])
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", state["chat_history"]),
-            ("human", "Current user query: {query}"),
-        ]
-    )
+        system_prompt = """You are a powerful AI assistant. Analyze the user's request and call the `ConceptExplainerInput` tool with the appropriate parameters.
+        Do not respond with conversational text. You MUST call the tool.
+        If some parameters like `concept` or `context` are implied, infer them from the conversation context.
+        The user's query is: '{query}'"""
 
-    chain = prompt | llm_with_tool
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", state["chat_history"]),
+                ("human", "Current user query: {query}"),
+            ]
+        )
 
-    response = chain.invoke({"query": state["current_query"]})
+        chain = prompt | llm_with_tool
 
-    if not response.tool_calls:
-        print(f"ERROR: AI did not call a tool. Response: {response.content}")
-        raise ValueError("No tool call found in the response.")
+        response = chain.invoke({"query": state["current_query"]})
 
-    extracted_args = response.tool_calls[0]["args"]
+        if not response.tool_calls:
+            print(f"ERROR: AI did not call a tool. Response: {response.content}")
+            raise ValueError("No tool call found in the response.")
 
-    extracted_args["user_info"] = state["user_profile"]
-    extracted_args["chat_history"] = state["chat_history"]
+        extracted_args = response.tool_calls[0]["args"]
 
-    print(f"Extracted concept explainer parameters: {extracted_args}")
-    return {"extracted_parameters": extracted_args}
+        extracted_args["user_info"] = state["user_profile"]
+        extracted_args["chat_history"] = state["chat_history"]
+
+        print(f"Extracted concept explainer parameters: {extracted_args}")
+        return {"extracted_parameters": extracted_args}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        raise
 
 
 def generate_clarification_response(state: GraphState) -> dict:
     print("---GENERATING CLARIFICATION---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0.5)
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    system_prompt = """You are a friendly and helpful AI tutor. The user has said something that isn't a clear request for a specific tool. Your job is to ask a polite, clarifying question. Ask them what topic they are studying or what they would like to do (e.g., get notes, flashcards, or an explanation)."""
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0.5)
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", "{query}"),
-        ]
-    )
+        system_prompt = """You are a friendly and helpful AI tutor. The user has said something that isn't a clear request for a specific tool. Your job is to ask a polite, clarifying question. Ask them what topic they are studying or what they would like to do (e.g., get notes, flashcards, or an explanation)."""
 
-    chain = prompt | llm
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "{query}"),
+            ]
+        )
 
-    response = chain.invoke({"query": state["current_query"]})
+        chain = prompt | llm
 
-    state["final_output"] = response.content
+        response = chain.invoke({"query": state["current_query"]})
 
-    print(f"Clarification response: {state['final_output']}")
+        state["final_output"] = response.content
 
-    return {"final_output": state["final_output"]}
+        print(f"Clarification response: {state['final_output']}")
+
+        return {"final_output": state["final_output"]}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        state["final_output"] = "I need to know what topic you'd like help with. Could you please specify?"
+        return {"final_output": state["final_output"]}
 
 
 def request_missing_info(state: GraphState) -> dict:
     print("---REQUESTING MISSING INFO---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    system_prompt = "You are a friendly AI tutor. The user has asked for flashcards but did not provide a topic. Ask them a clear and simple question to get the topic for the flashcards."
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0)
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", "{query}"),
-        ]
-    )
+        system_prompt = "You are a friendly AI tutor. The user has asked for flashcards but did not provide a topic. Ask them a clear and simple question to get the topic for the flashcards."
 
-    chain = prompt | llm
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "{query}"),
+            ]
+        )
 
-    response = chain.invoke({"query": state["current_query"]})
+        chain = prompt | llm
 
-    state["final_output"] = response.content
+        response = chain.invoke({"query": state["current_query"]})
 
-    print(f"Missing info request: {state['final_output']}")
+        state["final_output"] = response.content
 
-    return {"final_output": state["final_output"]}
+        print(f"Missing info request: {state['final_output']}")
+
+        return {"final_output": state["final_output"]}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        state["final_output"] = "Could you please tell me what topic you'd like flashcards for?"
+        return {"final_output": state["final_output"]}
 
 
 def format_final_response(state: GraphState) -> dict:
     print("---FORMATTING FINAL RESPONSE---")
 
-    llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0.5)
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
 
-    system_prompt = "You are a helpful AI tutor. You have just received the raw JSON output from a tool. Your job is to format this data into a clear, friendly, and helpful message for the student. Use markdown for formatting, like lists or bold text, to make the information easy to read."
+        llm = ChatGoogleGenerativeAI(model="models/gemini-pro-latest", temperature=0.5)
 
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("human", "{api_response}"),
-        ]
-    )
+        system_prompt = "You are a helpful AI tutor. You have just received the raw JSON output from a tool. Your job is to format this data into a clear, friendly, and helpful message for the student. Use markdown for formatting, like lists or bold text, to make the information easy to read."
 
-    chain = prompt | llm
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system_prompt),
+                ("human", "{api_response}"),
+            ]
+        )
 
-    response = chain.invoke({"api_response": state["api_response"]})
+        chain = prompt | llm
 
-    state["final_output"] = response.content
+        response = chain.invoke({"api_response": state["api_response"]})
 
-    print(f"Formatted final response: {state['final_output']}")
+        state["final_output"] = response.content
 
-    return {"final_output": state["final_output"]}
+        print(f"Formatted final response: {state['final_output']}")
+
+        return {"final_output": state["final_output"]}
+    except ImportError as e:
+        print(f"Warning: Could not import langchain_google_genai: {e}")
+        state["final_output"] = f"Here's the information: {state['api_response']}"
+        return {"final_output": state["final_output"]}
