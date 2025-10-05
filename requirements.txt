@@ -1,9 +1,9 @@
 fastapi
 uvicorn
-langchain
+langchain>=0.1.0
 langgraph
-langchain-openai  # Added for OpenAI models
-langchain-google-genai  # Added for Google Gemini models
+langchain-openai
+langchain-google-genai
 pydantic
 python-dotenv
 httpx
