@@ -3,7 +3,10 @@ uvicorn
 langchain
 langgraph
 langchain-openai  # Added for OpenAI models
+langchain-google-genai  # Added for Google Gemini models
 pydantic
 python-dotenv
 httpx
-numpy<2.0 
+numpy<2.0
+pytest
+pytest-asyncio 
