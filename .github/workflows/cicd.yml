@@ -29,7 +29,9 @@ jobs:
       run: |
         python -c "import sys; print(f'Python version: {sys.version}')"
         python -c "import langchain; print(f'LangChain version: {langchain.__version__}')"
-        pytest -v
+        cd /home/runner/work/autonomous-tutor-orchestrator/autonomous-tutor-orchestrator
+        python -c "import sys; sys.path.insert(0, '.'); from src.nodes import route_query; print('Import test successful')"
+        python -m pytest tests/ -v
 
   build-and-push-docker:
     needs: test
